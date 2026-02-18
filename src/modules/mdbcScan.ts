@@ -36,9 +36,14 @@ interface BetterBibTeX {
 export class BBTHelper {
   @trace
   private static BBTReady() {
+    // @ts-ignore
+    if (!Zotero?.BetterBibTeX) {
+      Logger.log('bbt-bridge', 'startup: BetterBibTeX is not installed', false, 'error')
+      return false
+    }
     if (
       // @ts-ignore
-      !Zotero?.BetterBibTeX?.ready ||
+      !Zotero.BetterBibTeX.ready ||
       // @ts-ignore
       Zotero.BetterBibTeX.ready.pending
       // || !Zotero.BetterBibTeX.TestSupport
@@ -52,8 +57,11 @@ export class BBTHelper {
 
   @trace
   private static async _check() {
-    // TODO don't call Zotero.BetterBibTeX.ready before checking if Zotero.BetterBibTeX exists
-    // TODO make sure error is reported to summary notification (maybe just throw error)
+    // @ts-ignore
+    if (!Zotero?.BetterBibTeX) {
+      Logger.log('bbt-bridge', 'startup: BetterBibTeX is not installed', false, 'error')
+      return false
+    }
     // @ts-ignore
     await Zotero.BetterBibTeX.ready
     return this.BBTReady()
@@ -216,7 +224,9 @@ export class ScanMarkdownFiles {
     const sourcedir = sourcedirParam.value
 
     const bbtyamlkeywordParam =
-      matchstrategy === 'bbtcitekeyyaml' ? getParam.bbtyamlkeyword() : { name: '', value: '', valid: false }
+      matchstrategy === 'bbtcitekeyyaml' || matchstrategy === 'zotcitekey'
+        ? getParam.bbtyamlkeyword()
+        : { name: '', value: '', valid: false }
 
     const bbtregexpParam =
       matchstrategy === 'bbtcitekeyregexp' ? getParam.bbtregexp() : { name: '', value: new RegExp(''), valid: false }
@@ -290,7 +300,7 @@ export class ScanMarkdownFiles {
 
         /// get citekey from metadata
         try {
-          if (matchstrategy === 'bbtcitekeyyaml') {
+          if (matchstrategy === 'bbtcitekeyyaml' || matchstrategy === 'zotcitekey') {
             if (bbtyamlkeywordParam.valid) {
               /// pattern to match citekey in MD file metadata
               const re_metadata = new RegExp(`^${bbtyamlkeywordParam.value}: *(?:['"])?(\\S+?)(?:['"]|\\s|$)`, 'm')
@@ -541,6 +551,49 @@ export class ScanMarkdownFiles {
   }
 
   @trace
+  private static async mapCitekeysZoteroNativeQuery(): Promise<Record<string, number[]>> {
+    /*
+     * make Record of Zotero native citationKey -> zoteroID for every item in the library
+     */
+
+    /// get all items in library
+    const s = new Zotero.Search()
+    if (getParam.grouplibraries().value === 'user') {
+      // @ts-ignore
+      s.libraryID = Zotero.Libraries.userLibraryID
+    }
+    s.addCondition('deleted', 'false', '')
+    const itemIds = await s.search()
+
+    const ZotItems: Zotero.Item[] = await Zotero.Items.getAsync(itemIds)
+
+    const citekeymap = ZotItems.reduce((accumulator: Record<string, number[]>, zotitem) => {
+      if (!zotitem.isRegularItem()) {
+        return accumulator
+      }
+      let citationKey = ''
+      try {
+        citationKey = (zotitem.getField('citationKey') as string) || ''
+      } catch (err) {
+        // citationKey field may not exist on certain item types
+      }
+      if (!citationKey) {
+        return accumulator
+      }
+      if (!accumulator[citationKey]) {
+        accumulator[citationKey] = [zotitem.id]
+      } else {
+        accumulator[citationKey].push(zotitem.id)
+      }
+      return accumulator
+    }, {})
+
+    Logger.addData('mapCitekeysZoteroNativeQuery', citekeymap, true)
+
+    return citekeymap
+  }
+
+  @trace
   private static async mapIDkeysZoteroquery(): Promise<Record<string, number[]>> {
     /*
      * make Record of zoteroKey -> zoteroID for every item in the library
@@ -742,9 +795,9 @@ export class ScanMarkdownFiles {
     regex to extract the zotkey: regex
     */
 
-    if (matchstrategy === 'bbtcitekeyyaml' || matchstrategy === 'bbtcitekeyregexp') {
-      //// get BBT citekeys from markdown files ////
-      res = await this.scanVault() /// returns data array containing BBT citekeys
+    if (matchstrategy === 'bbtcitekeyyaml' || matchstrategy === 'bbtcitekeyregexp' || matchstrategy === 'zotcitekey') {
+      //// get citekeys from markdown files ////
+      res = await this.scanVault() /// returns data array containing citekeys
 
       if (res.length === 0) {
         let message: messageData
@@ -778,9 +831,14 @@ export class ScanMarkdownFiles {
       }
 
       //// get zoteroKeys and zoteroIDs for every item in Zotero library ////
-      const citekeymap: Record<string, number[]> = await this.mapCitekeysBBTquery() /// returns dict mapping citekey => [zoteroId_1, zoteroId_2, ...]
+      let citekeymap: Record<string, number[]>
+      if (matchstrategy === 'zotcitekey') {
+        citekeymap = await this.mapCitekeysZoteroNativeQuery() /// returns dict mapping native citationKey => [zoteroId_1, zoteroId_2, ...]
+      } else {
+        citekeymap = await this.mapCitekeysBBTquery() /// returns dict mapping BBT citekey => [zoteroId_1, zoteroId_2, ...]
+      }
 
-      //// map BBT citekeys from markdown files with zoteroIDs ////
+      //// map citekeys from markdown files with zoteroIDs ////
       res = this.sliceObj(res, citekeymap)
     } else if (matchstrategy === 'zotitemkey') {
       //// get zoterokeys from markdown files ////
